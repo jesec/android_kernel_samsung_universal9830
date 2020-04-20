@@ -25,6 +25,7 @@
 #include <linux/debugfs.h>
 #include <linux/serial_core.h>
 #include <linux/sysfs.h>
+#include <linux/debug-snapshot.h>
 
 #include <asm/setup.h>  /* for COMMAND_LINE_SIZE */
 #include <asm/page.h>
@@ -574,6 +575,9 @@ static int __init __reserved_mem_reserve_reg(unsigned long node,
 		base = dt_mem_next_cell(dt_root_addr_cells, &prop);
 		size = dt_mem_next_cell(dt_root_size_cells, &prop);
 
+		if (dbg_snapshot_reserved_mem_check(node, (unsigned long)size))
+			return -EINVAL;
+
 		if (size &&
 		    early_init_dt_reserve_memory_arch(base, size, nomap) == 0)
 			pr_debug("Reserved memory: reserved region for node '%s': base %pa, size %ld MiB\n",
@@ -622,6 +626,7 @@ static int __init __fdt_scan_reserved_mem(unsigned long node, const char *uname,
 {
 	static int found;
 	int err;
+	int noship;	
 
 	if (!found && depth == 1 && strcmp(uname, "reserved-memory") == 0) {
 		if (__reserved_mem_check_root(node) != 0) {
@@ -642,6 +647,15 @@ static int __init __fdt_scan_reserved_mem(unsigned long node, const char *uname,
 
 	if (!of_fdt_device_is_available(initial_boot_params, node))
 		return 0;
+
+	noship = of_get_flat_dt_prop(node, "no-ship", NULL) != NULL;
+#ifdef CONFIG_SAMSUNG_PRODUCT_SHIP
+	if (noship) {
+		pr_info("Reserved memory: skip to reserve memory for node '%s'\n",
+			uname);
+		return 0;
+	}
+#endif
 
 	err = __reserved_mem_reserve_reg(node, uname);
 	if (err == -ENOENT && of_get_flat_dt_prop(node, "size", NULL))
@@ -672,6 +686,7 @@ void __init early_init_fdt_scan_reserved_mem(void)
 		if (!size)
 			break;
 		early_init_dt_reserve_memory_arch(base, size, 0);
+		record_memsize_reserved(NULL, base, size, 0, 0);
 	}
 
 	of_scan_flat_dt(__fdt_scan_reserved_mem, NULL);
@@ -1253,6 +1268,7 @@ void __init early_init_dt_scan_nodes(void)
 
 	/* Setup memory, calling early_init_dt_add_memory_arch */
 	of_scan_flat_dt(early_init_dt_scan_memory, NULL);
+	record_memsize_memory_hole();
 }
 
 bool __init early_init_dt_scan(void *params)

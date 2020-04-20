@@ -30,6 +30,7 @@
 #include <linux/relay.h>
 #include <linux/slab.h>
 #include <linux/percpu-rwsem.h>
+#include <linux/sec_perf.h>
 
 #include <trace/events/power.h>
 #define CREATE_TRACE_POINTS
@@ -1183,8 +1184,15 @@ int freeze_secondary_cpus(int primary)
 	for_each_online_cpu(cpu) {
 		if (cpu == primary)
 			continue;
+
+		if (pm_wakeup_pending()) {
+			error = -EBUSY;
+			break;
+		}
 		trace_suspend_resume(TPS("CPU_OFF"), cpu, true);
+		dbg_snapshot_suspend("CPU_OFF", _cpu_down, NULL, cpu, DSS_FLAG_IN);
 		error = _cpu_down(cpu, 1, CPUHP_OFFLINE);
+		dbg_snapshot_suspend("CPU_OFF", _cpu_down, NULL, cpu, DSS_FLAG_OUT);
 		trace_suspend_resume(TPS("CPU_OFF"), cpu, false);
 		if (!error)
 			cpumask_set_cpu(cpu, frozen_cpus);
@@ -1235,7 +1243,9 @@ void enable_nonboot_cpus(void)
 
 	for_each_cpu(cpu, frozen_cpus) {
 		trace_suspend_resume(TPS("CPU_ON"), cpu, true);
+		dbg_snapshot_suspend("CPU_ON", _cpu_up, NULL, cpu, DSS_FLAG_IN);
 		error = _cpu_up(cpu, 1, CPUHP_ONLINE);
+		dbg_snapshot_suspend("CPU_ON", _cpu_up, NULL, cpu, DSS_FLAG_OUT);
 		trace_suspend_resume(TPS("CPU_ON"), cpu, false);
 		if (!error) {
 			pr_info("CPU%d is up\n", cpu);
@@ -1469,6 +1479,14 @@ static struct cpuhp_step cpuhp_hp_states[] = {
 		.name			= "sched:active",
 		.startup.single		= sched_cpu_activate,
 		.teardown.single	= sched_cpu_deactivate,
+	},
+#endif
+
+#ifdef CONFIG_SEC_PERF_LATENCYCHECKER
+	[CPUHP_AP_LATENYCHECKER_ONLINE] = {
+		.name			= "latenychecker:online",
+		.startup.single		= sec_perf_latencychecker_enable,
+		.teardown.single	= sec_perf_latencychecker_disable,
 	},
 #endif
 

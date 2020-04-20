@@ -20,6 +20,7 @@
 #include <linux/usb/hcd.h>	/* for usbcore internals */
 #include <linux/usb/of.h>
 #include <asm/byteorder.h>
+#include <linux/usb_notify.h>
 
 #include "usb.h"
 
@@ -1212,6 +1213,24 @@ void usb_disable_device(struct usb_device *dev, int skip_ep0)
 	int i;
 	struct usb_hcd *hcd = bus_to_hcd(dev->bus);
 
+#if defined(CONFIG_USB_HOST_SAMSUNG_FEATURE)
+	if (hcd->driver->check_bandwidth) {
+		/* First pass: Cancel URBs, leave endpoint pointers intact. */
+		for (i = skip_ep0; i < 16; ++i) {
+			usb_disable_endpoint(dev, i, false);
+			usb_disable_endpoint(dev, i + USB_DIR_IN, false);
+		}
+		/* Remove endpoints from the host controller internal state */
+		mutex_lock(hcd->bandwidth_mutex);
+		usb_hcd_alloc_bandwidth(dev, NULL, NULL, NULL);
+		mutex_unlock(hcd->bandwidth_mutex);
+		/* Second pass: remove endpoint pointers */
+	}
+	for (i = skip_ep0; i < 16; ++i) {
+		usb_disable_endpoint(dev, i, true);
+		usb_disable_endpoint(dev, i + USB_DIR_IN, true);
+	}
+#endif
 	/* getting rid of interfaces will disconnect
 	 * any drivers bound to them (a key side effect)
 	 */
@@ -1990,6 +2009,10 @@ free_interfaces:
 	}
 	usb_set_device_state(dev, USB_STATE_CONFIGURED);
 
+#ifdef CONFIG_USB_AUDIO_ENHANCED_DETECT_TIME
+	send_usb_audio_uevent(dev, 0, 1);
+#endif
+
 	if (cp->string == NULL &&
 			!(dev->quirks & USB_QUIRK_CONFIG_INTF_STRINGS))
 		cp->string = usb_cache_string(dev, cp->desc.iConfiguration);
@@ -2020,6 +2043,11 @@ free_interfaces:
 			continue;
 		}
 		create_intf_ep_devs(intf);
+		if (dev->bus->root_hub != dev) {
+			store_usblog_notify(NOTIFY_PORT_CLASS,
+				(void *)&dev->descriptor.bDeviceClass,
+				(void *)&intf->cur_altsetting->desc.bInterfaceClass);
+		}
 	}
 
 	usb_autosuspend_device(dev);

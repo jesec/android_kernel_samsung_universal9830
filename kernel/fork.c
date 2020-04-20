@@ -101,9 +101,14 @@
 #include <asm/tlbflush.h>
 
 #include <trace/events/sched.h>
+#include <linux/task_integrity.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/task.h>
+
+#ifdef CONFIG_SECURITY_DEFEX
+#include <linux/defex.h>
+#endif
 
 /*
  * Minimum number of threads to boot the kernel
@@ -1346,6 +1351,8 @@ static int copy_mm(unsigned long clone_flags, struct task_struct *tsk)
 good_mm:
 	tsk->mm = mm;
 	tsk->active_mm = mm;
+	if (tsk->mm->mmap_base && !(tsk->mm->mmap_base >> 32))
+		tsk->sse = 1;
 	return 0;
 
 fail_nomem:
@@ -1597,6 +1604,16 @@ static void posix_cpu_timers_init(struct task_struct *tsk)
 static inline void posix_cpu_timers_init(struct task_struct *tsk) { }
 #endif
 
+#ifdef CONFIG_KDP_CRED
+void rkp_assign_pgd(struct task_struct *p)
+{
+	u64 pgd;
+	pgd = (u64)(p->mm ? p->mm->pgd :swapper_pg_dir);
+
+	uh_call(UH_APP_RKP, RKP_KDP_X43, (u64)p->cred, (u64)pgd, 0, 0);
+}
+#endif
+
 static inline void init_task_pid_links(struct task_struct *task)
 {
 	enum pid_type type;
@@ -1614,6 +1631,59 @@ init_task_pid(struct task_struct *task, enum pid_type type, struct pid *pid)
 	else
 		task->signal->pids[type] = pid;
 }
+
+#ifdef CONFIG_FIVE
+static int dup_task_integrity(unsigned long clone_flags,
+					struct task_struct *tsk)
+{
+	int ret = 0;
+
+	if (clone_flags & CLONE_VM) {
+		task_integrity_get(current->integrity);
+		tsk->integrity = current->integrity;
+	} else {
+		tsk->integrity = task_integrity_alloc();
+
+		if (!tsk->integrity)
+			ret = -ENOMEM;
+	}
+
+	return ret;
+}
+
+static inline void task_integrity_cleanup(struct task_struct *tsk)
+{
+	task_integrity_put(tsk->integrity);
+}
+
+static inline int task_integrity_apply(unsigned long clone_flags,
+						struct task_struct *tsk)
+{
+	int ret = 0;
+
+	if (!(clone_flags & CLONE_VM))
+		ret = five_fork(current, tsk);
+
+	return ret;
+}
+#else
+static inline int dup_task_integrity(unsigned long clone_flags,
+						struct task_struct *tsk)
+{
+	return 0;
+}
+
+static inline void task_integrity_cleanup(struct task_struct *tsk)
+{
+}
+
+static inline int task_integrity_apply(unsigned long clone_flags,
+						struct task_struct *tsk)
+{
+	return 0;
+}
+
+#endif
 
 static inline void rcu_copy_process(struct task_struct *p)
 {
@@ -1791,6 +1861,7 @@ static __latent_entropy struct task_struct *copy_process(
 
 	init_sigpending(&p->pending);
 
+	p->sse = 0;
 	p->utime = p->stime = p->gtime = 0;
 #ifdef CONFIG_ARCH_HAS_SCALED_CPUTIME
 	p->utimescaled = p->stimescaled = 0;
@@ -1880,9 +1951,14 @@ static __latent_entropy struct task_struct *copy_process(
 		goto bad_fork_cleanup_perf;
 	/* copy all the process information */
 	shm_init_task(p);
-	retval = security_task_alloc(p, clone_flags);
+	retval = dup_task_integrity(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_audit;
+	retval = security_task_alloc(p, clone_flags);
+	if (retval) {
+		task_integrity_cleanup(p);
+		goto bad_fork_cleanup_audit;
+	}
 	retval = copy_semundo(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_security;
@@ -2031,6 +2107,9 @@ static __latent_entropy struct task_struct *copy_process(
 		goto bad_fork_cancel_cgroup;
 	}
 
+	retval = task_integrity_apply(clone_flags, p);
+	if (retval)
+		goto bad_fork_cancel_cgroup;
 
 	init_task_pid_links(p);
 	if (likely(p->pid)) {
@@ -2087,7 +2166,10 @@ static __latent_entropy struct task_struct *copy_process(
 
 	trace_task_newtask(p, clone_flags);
 	uprobe_copy_process(p, clone_flags);
-
+#ifdef CONFIG_KDP_CRED
+	if(rkp_cred_enable)
+		rkp_assign_pgd(p);
+#endif
 	return p;
 
 bad_fork_cancel_cgroup:
@@ -2226,6 +2308,10 @@ long _do_fork(unsigned long clone_flags,
 	pid = get_task_pid(p, PIDTYPE_PID);
 	nr = pid_vnr(pid);
 
+#ifdef CONFIG_SECURITY_DEFEX
+	task_defex_zero_creds(p);
+#endif
+
 	if (clone_flags & CLONE_PARENT_SETTID)
 		put_user(nr, parent_tidptr);
 
@@ -2235,6 +2321,7 @@ long _do_fork(unsigned long clone_flags,
 		get_task_struct(p);
 	}
 
+	cpumask_setall(&p->aug_cpus_allowed);
 	wake_up_new_task(p);
 
 	/* forking complete and child started to run, tell ptracer */

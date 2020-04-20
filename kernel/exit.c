@@ -68,6 +68,10 @@
 #include <asm/pgtable.h>
 #include <asm/mmu_context.h>
 
+#ifdef CONFIG_SECURITY_DEFEX
+#include <linux/defex.h>
+#endif
+
 static void __unhash_process(struct task_struct *p, bool group_dead)
 {
 	nr_threads--;
@@ -770,11 +774,18 @@ static void check_stack_usage(void)
 #else
 static inline void check_stack_usage(void) {}
 #endif
-
+#ifdef CONFIG_FAST_TRACK
+#include <cpu/ftt/ftt.h>
+extern struct ftt_stat fttstat;
+#endif
 void __noreturn do_exit(long code)
 {
 	struct task_struct *tsk = current;
 	int group_dead;
+
+#ifdef CONFIG_SECURITY_DEFEX
+	task_defex_zero_creds(current);
+#endif
 
 	profile_task_exit(tsk);
 	kcov_task_exit(tsk);
@@ -875,6 +886,10 @@ void __noreturn do_exit(long code)
 	exit_task_namespaces(tsk);
 	exit_task_work(tsk);
 	exit_thread(tsk);
+#ifdef CONFIG_FAST_TRACK
+	if(tsk->se.ftt_mark)
+		fttstat.ftt_cnt--;
+#endif
 
 	/*
 	 * Flush inherited counters to the parent - before the parent
@@ -956,6 +971,14 @@ void
 do_group_exit(int exit_code)
 {
 	struct signal_struct *sig = current->signal;
+
+#ifdef CONFIG_SEC_DEBUG_INIT_EXIT_PANIC
+	if (current->pid == 1) {
+		pr_err("[%s] trap before init(1) group exit, exit_code:%d\n",
+			current->comm, exit_code);
+		panic("Attempted to kill init task group! exitcode=0x%08x\n", exit_code);
+	}
+#endif
 
 	BUG_ON(exit_code & 0x80); /* core dumps don't get here */
 
